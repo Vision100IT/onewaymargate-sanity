@@ -3,64 +3,54 @@ import Dropzone from 'react-dropzone';
 import Button from 'part:@sanity/components/buttons/default';
 import sanityClient from 'part:@sanity/base/client';
 import styles from './s3upload.css';
+import speakingurl from 'speakingurl';
 
 const bucket = 'sermons.onewaymargate.org';
 
-const getPresignedPostData = (selectedFile, bucket) => {
-  return new Promise(resolve => {
-    const xhr = new XMLHttpRequest();
-
-    // Set the proper URL here.
-    const url =
-      'https://serverless.newfrontdoor.org/sermon-upload';
-
-    xhr.open('POST', url, true);
-    xhr.setRequestHeader('Content-Type', 'application/json');
-    xhr.send(
-      JSON.stringify({
-        name: selectedFile.name,
-        type: selectedFile.type,
-        bucket: bucket
-      })
-    );
-    xhr.addEventListener('load', e => {
-      console.log(JSON.parse(e.target.response));
-      resolve(JSON.parse(e.target.response));
-    });
+function getPresignedPostData(selectedFile, bucket) {
+  return fetch('https://onewaymargate.org/api/sermon-upload', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      name: selectedFile.name,
+      type: selectedFile.type,
+      bucket
+    })
   });
-};
+}
 
-const uploadFileToS3 = (presignedPostData, file) => {
-  return new Promise((resolve, reject) => {
-    const formData = new FormData();
-    Object.keys(presignedPostData.fields).forEach(key => {
-      formData.append(key, presignedPostData.fields[key]);
-    });
-    // Actual file has to be appended last.
-    formData.append('file', file);
-
-    fetch(presignedPostData.url, {
-      method: 'post',
-      body: formData
-    }).then(response => {
-      console.log(response);
-      response.status === 204 ? resolve() : reject(response);
-    });
+function uploadFileToS3(presignedPostData, file) {
+  const formData = new FormData();
+  Object.keys(presignedPostData.fields).forEach(key => {
+    formData.append(key, presignedPostData.fields[key]);
   });
-};
+  // Actual file has to be appended last.
+  formData.append('file', file);
 
-function patchSanity(title, passage, series, date, speaker, key) {
+  return fetch(presignedPostData.url, {
+    method: 'POST',
+    body: formData
+  });
+}
+
+function patchSanity({title, passage, series, date, speaker, key}) {
   const doc = {
-    _type: 'sermons',
+    _type: 'sermon',
     title,
     passage,
-    date,
-    preacher: {_ref: speaker},
+    slug: {
+      _type: 'slug',
+      current: speakingurl(title, {truncate: 200, symbols: true})
+    },
+    preachedDate: date,
+    speaker: {_ref: speaker},
     series: {_ref: series},
     file: key
   };
 
-  sanityClient.create(doc).then(res => {
+  return sanityClient.create(doc).then(res => {
     console.log(`Document was created, document ID is ${res._id}`);
   });
 }
@@ -95,6 +85,8 @@ const rejectStyle = {
   backgroundColor: '#eee'
 };
 
+const uploadStates = ['init', 'pending', 'sending', 'complete'];
+
 class s3upload extends Component {
   constructor(props) {
     super(props);
@@ -106,7 +98,8 @@ class s3upload extends Component {
       speaker: '',
       series: '',
       key: null,
-      dataTrue: false
+      dataTrue: false,
+      uploadState: uploadStates[0]
     };
 
     this.handleInputChange = this.handleInputChange.bind(this);
@@ -128,22 +121,12 @@ class s3upload extends Component {
         extraData: ''
       }));
     });
-    sanityClient
-      .request({uri: '/addons/dashboard', withCredentials: false})
-      .then(response => {
-        this.setState({
-          extraData: response.items
-        });
-      });
   }
 
   handleInputChange(event) {
     const {target} = event;
     const value = target.type === 'checkbox' ? target.checked : target.value;
     const {name} = target;
-
-    console.log(name);
-
     this.setState({
       [name]: value
     });
@@ -151,32 +134,31 @@ class s3upload extends Component {
 
   updateKey(keyVal) {
     this.setState({
-      key: keyVal
+      key: keyVal,
+      uploadState: uploadStates[1]
     });
   }
 
   async activateUpload(selectedFile, bucket) {
     // Step 1 - get pre-signed POST data.
-    const {data} = await getPresignedPostData(
-      selectedFile,
-      bucket
-    );
-    console.log(data);
-    await this.updateKey(data);
+    const response = await getPresignedPostData(selectedFile, bucket);
+
+    if (response.ok) {
+      await response.json().then(data => this.updateKey(data));
+    }
   }
 
-  completeUpload(selectedFile, key) {
+  async completeUpload(selectedFile, presignedPostData) {
+    this.setState({
+      uploadState: uploadStates[2]
+    });
     try {
-      uploadFileToS3(key, selectedFile);
-      patchSanity(
-        this.state.title,
-        this.state.passage,
-        this.state.series,
-        this.state.preachedDate,
-        this.state.speaker,
-        this.state.key.fields.key
-      );
+      await uploadFileToS3(presignedPostData, selectedFile);
+      await patchSanity(this.state);
       console.log('File was successfully uploaded!');
+      this.setState({
+        uploadState: uploadStates[3]
+      });
     } catch (error) {
       console.log('An error occurred!', error.message);
     }
@@ -384,13 +366,19 @@ class s3upload extends Component {
             bleed
             color="primary"
             kind="simple"
-  
-                      onClick=
-            {() =>
-           
-               this.completeUpload(this.state.file[0], this.state.key)}
+            disabled={
+              this.state.uploadState === uploadStates[2] ||
+              this.state.uploadState === uploadStates[3]
+            }
+            onClick={() =>
+              this.completeUpload(this.state.file[0], this.state.key)
+            }
           >
-            Publish Sermon
+            {this.state.uploadState === uploadStates[2]
+              ? 'Spinner'
+              : this.state.uploadState === uploadStates[3]
+              ? 'Sermon Published'
+              : 'Publish Sermon'}
           </Button>
         </div>
       </div>
