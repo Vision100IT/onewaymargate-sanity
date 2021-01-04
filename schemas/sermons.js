@@ -44,8 +44,7 @@ export default {
     {
       title: 'Passage',
       name: 'passage',
-      type: 'array',
-      inputComponent: BibleInput,
+      type: 'string',
       validation: Rule => Rule.required()
     },
     {
